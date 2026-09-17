@@ -25,7 +25,7 @@ async def stream_speech(text: str, voice_id: str = "a0e99841-438c-4a64-b679-ae50
         "output_format": {
             "container": "raw",
             "encoding": "pcm_s16le",
-            "sample_rate": 8000
+            "sample_rate": 24000
         }
     }
     
@@ -65,7 +65,7 @@ async def generate_speech(text: str, voice_id: str = "a0e99841-438c-4a64-b679-ae
         "output_format": {
             "container": "wav",
             "encoding": "pcm_s16le",
-            "sample_rate": 8000
+            "sample_rate": 24000
         }
     }
     
