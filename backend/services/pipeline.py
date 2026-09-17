@@ -12,34 +12,28 @@ instruction
 emotional"""
 
 SYSTEM_PROMPT = """You are a calm, comforting, and highly capable voice assistant. 
-Be concise but warm. Use the user's context and memories below to inform your response, but do not mention the memories directly unless relevant."""
+Be concise but warm. Use the user's context and memories below to inform your response, but do not mention the memories directly unless relevant.
+
+CRITICAL: Your response MUST start exactly with an intent tag in brackets, chosen from: [small_talk], [question], [instruction], or [emotional]. Immediately after the tag, provide your response.
+Example: [small_talk] It's so nice to hear from you!"""
 
 MEMORY_PROMPT = """Analyze the following exchange. Does it contain a persistent, factual piece of information about the user that is worth remembering long-term?
 If yes, output a concise single sentence summarizing the fact.
 If no, output exactly 'NO'."""
 
 async def run_pipeline(user_id: uuid.UUID, message_text: str) -> dict:
-    # 1 & 2. Retrieve memories
     memories = await retrieve_memories(user_id, message_text, limit=5)
-    
-    # 3. Classify intent
-    raw_intent = await complete(INTENT_PROMPT, [{"role": "user", "content": message_text}])
-    raw_intent = raw_intent.strip().lower()
-    
-    valid_intents = {"small_talk", "question", "instruction", "emotional"}
-    if raw_intent in valid_intents:
-        intent = raw_intent
-    else:
-        logger.warning(f"Unexpected intent parsed: '{raw_intent}'. Defaulting to small_talk.")
-        intent = "small_talk"
-        
-    # 4 & 5. Final reply
     memory_context = "\n".join([f"- {m}" for m in memories]) if memories else "No relevant memories."
     
-    contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}\n\nDetected Intent: {intent}"
+    contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}"
     reply = await complete(contextualized_prompt, [{"role": "user", "content": message_text}])
     
-    # 6. Memory extraction
+    intent = "small_talk"
+    if reply.startswith("[") and "]" in reply[:30]:
+        end_idx = reply.find("]")
+        intent = reply[1:end_idx].lower()
+        reply = reply[end_idx+1:].strip()
+        
     exchange = f"User: {message_text}\nAssistant: {reply}"
     memory_eval = await complete(MEMORY_PROMPT, [{"role": "user", "content": exchange}])
     memory_eval = memory_eval.strip()
@@ -58,18 +52,38 @@ async def extract_memory_from_exchange(user_id: uuid.UUID, message_text: str, re
         await save_memory(user_id, memory_eval)
 
 from backend.services.llm_client import stream_complete
+import re
+
+async def _stream_with_intent_parsed(gen):
+    buffer = ""
+    intent_parsed = False
+    
+    async for chunk in gen:
+        if not intent_parsed:
+            buffer += chunk
+            if "]" in buffer:
+                end_idx = buffer.find("]")
+                intent = buffer[1:end_idx].lower()
+                remaining = buffer[end_idx+1:].lstrip()
+                intent_parsed = True
+                if remaining:
+                    yield remaining
+            elif len(buffer) > 30 and "[" not in buffer:
+                # Fallback if LLM forgot the tag
+                intent = "small_talk"
+                intent_parsed = True
+                yield buffer
+        else:
+            yield chunk
 
 async def run_pipeline_streaming(user_id: uuid.UUID, message_text: str):
     memories = await retrieve_memories(user_id, message_text, limit=5)
     
-    raw_intent = await complete(INTENT_PROMPT, [{"role": "user", "content": message_text}])
-    raw_intent = raw_intent.strip().lower()
-    
-    valid_intents = {"small_talk", "question", "instruction", "emotional"}
-    intent = raw_intent if raw_intent in valid_intents else "small_talk"
-    
     memory_context = "\n".join([f"- {m}" for m in memories]) if memories else "No relevant memories."
-    contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}\n\nDetected Intent: {intent}"
+    contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}"
     
     gen = stream_complete(contextualized_prompt, [{"role": "user", "content": message_text}])
-    return intent, gen
+    
+    # We can't return intent synchronously anymore because it streams.
+    # The caller expects (intent, text_gen). We'll default intent here to "streaming" and caller can just ignore it for voice.
+    return "streaming", _stream_with_intent_parsed(gen)

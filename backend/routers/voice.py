@@ -12,6 +12,9 @@ from backend.core.security import decode_access_token
 from backend.services.pipeline import run_pipeline_streaming, extract_memory_from_exchange
 from backend.services.tts_client import stream_speech
 
+import logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 @router.websocket("/ws/voice")
@@ -37,23 +40,34 @@ async def voice_websocket(websocket: WebSocket, token: str):
     interrupt_event = None
     turn_state = {}
 
+    import time
     async def run_turn(text: str, interrupt_event: asyncio.Event, turn_state: dict):
         try:
+            t0 = time.time()
+            logger.info(f"VOICE_TURN_START: {t0}")
+            
             intent, text_gen = await run_pipeline_streaming(user_id, text)
             
             full_reply = ""
             sentence_buffer = ""
+            first_token_received = False
             
             async for chunk in text_gen:
                 if interrupt_event.is_set():
                     break
                     
+                if not first_token_received and chunk.strip():
+                    t1 = time.time()
+                    logger.info(f"FIRST_TOKEN_RECEIVED: {t1} (Delay: {t1 - t0:.3f}s)")
+                    first_token_received = True
+                    
                 full_reply += chunk
                 sentence_buffer += chunk
                 
+                # Split on punctuation, or if the buffer gets too long (fallback)
                 match = re.search(r'([.?!]\s+|\n)', sentence_buffer)
-                if match:
-                    split_idx = match.end()
+                if match or len(sentence_buffer) > 150:
+                    split_idx = match.end() if match else len(sentence_buffer)
                     sentence = sentence_buffer[:split_idx].strip()
                     sentence_buffer = sentence_buffer[split_idx:]
                     
