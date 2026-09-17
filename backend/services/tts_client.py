@@ -21,10 +21,11 @@ class CartesiaSession:
     async def connect(self):
         url = "wss://api.cartesia.ai/tts/websocket?cartesia_version=2024-06-10"
         headers = {
-            "X-API-Key": self.api_key
+            "X-API-Key": self.api_key,
+            "Cartesia-Version": "2024-06-10"
         }
         try:
-            self.ws = await websockets.connect(url, additional_headers=headers)
+            self.ws = await websockets.connect(url, extra_headers=headers)
             self.connected = True
             logger.info("Cartesia WebSocket connected.")
         except Exception as e:
@@ -71,19 +72,16 @@ class CartesiaSession:
                     payload = {
                         "context_id": context_id,
                         "transcript": chunk + " ",
-                        "continue": True
+                        "continue": True,
+                        "model_id": "sonic-latest",
+                        "voice": {"mode": "id", "id": self.voice_id},
+                        "output_format": {
+                            "container": "raw",
+                            "encoding": "pcm_s16le",
+                            "sample_rate": 24000
+                        }
                     }
-                    if first:
-                        payload.update({
-                            "model_id": "sonic-latest",
-                            "voice": {"mode": "id", "id": self.voice_id},
-                            "output_format": {
-                                "container": "raw",
-                                "encoding": "pcm_s16le",
-                                "sample_rate": 24000
-                            }
-                        })
-                        first = False
+                    first = False
                         
                     await self._ensure_connected()
                     if self.connected:
@@ -94,7 +92,14 @@ class CartesiaSession:
                     await self.ws.send(json.dumps({
                         "context_id": context_id,
                         "transcript": "",
-                        "continue": False
+                        "continue": False,
+                        "model_id": "sonic-latest",
+                        "voice": {"mode": "id", "id": self.voice_id},
+                        "output_format": {
+                            "container": "raw",
+                            "encoding": "pcm_s16le",
+                            "sample_rate": 24000
+                        }
                     }))
             except Exception as e:
                 logger.error(f"Error pumping text to Cartesia: {e}")
