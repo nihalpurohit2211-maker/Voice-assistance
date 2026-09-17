@@ -10,7 +10,6 @@ from backend.db.session import async_session_maker
 from backend.db.models import ChatSession, ChatMessage
 from backend.core.security import decode_access_token
 from backend.services.pipeline import run_pipeline_streaming, extract_memory_from_exchange
-from backend.services.tts_client import stream_speech
 
 import logging
 logger = logging.getLogger(__name__)
@@ -40,7 +39,10 @@ async def voice_websocket(websocket: WebSocket, token: str):
     interrupt_event = None
     turn_state = {}
 
-    import time
+    from backend.services.tts_client import CartesiaSession
+    cartesia = CartesiaSession()
+    await cartesia.connect()
+
     async def run_turn(text: str, interrupt_event: asyncio.Event, turn_state: dict):
         try:
             t0 = time.time()
@@ -49,55 +51,47 @@ async def voice_websocket(websocket: WebSocket, token: str):
             intent, text_gen = await run_pipeline_streaming(user_id, text)
             
             full_reply = ""
-            sentence_buffer = ""
             first_token_received = False
             
-            async for chunk in text_gen:
-                if interrupt_event.is_set():
-                    break
-                    
-                if not first_token_received and chunk.strip():
-                    t1 = time.time()
-                    logger.info(f"FIRST_TOKEN_RECEIVED: {t1} (Delay: {t1 - t0:.3f}s)")
-                    first_token_received = True
-                    
-                full_reply += chunk
-                sentence_buffer += chunk
+            # Create a generator for sentence boundaries
+            async def sentence_generator():
+                nonlocal full_reply, first_token_received
+                sentence_buffer = ""
                 
-                # Split on punctuation, or if the buffer gets too long (fallback)
-                match = re.search(r'([.?!]\s+|\n)', sentence_buffer)
-                if match or len(sentence_buffer) > 150:
-                    split_idx = match.end() if match else len(sentence_buffer)
-                    sentence = sentence_buffer[:split_idx].strip()
-                    sentence_buffer = sentence_buffer[split_idx:]
-                    
-                    if sentence:
-                        is_first_chunk = True
-                        async for audio_b64 in stream_speech(sentence):
-                            if interrupt_event.is_set():
-                                break
-                            chunk_text = sentence if is_first_chunk else ""
-                            is_first_chunk = False
-                            await websocket.send_text(json.dumps({
-                                "type": "reply_chunk",
-                                "text": chunk_text,
-                                "audio": audio_b64
-                            }))
-                            
-            if not interrupt_event.is_set() and sentence_buffer.strip():
-                sentence = sentence_buffer.strip()
-                is_first_chunk = True
-                async for audio_b64 in stream_speech(sentence):
+                async for chunk in text_gen:
                     if interrupt_event.is_set():
                         break
-                    chunk_text = sentence if is_first_chunk else ""
-                    is_first_chunk = False
-                    await websocket.send_text(json.dumps({
-                        "type": "reply_chunk",
-                        "text": chunk_text,
-                        "audio": audio_b64
-                    }))
+                        
+                    if not first_token_received and chunk.strip():
+                        t1 = time.time()
+                        logger.info(f"FIRST_TOKEN_RECEIVED: {t1} (Delay: {t1 - t0:.3f}s)")
+                        first_token_received = True
+                        
+                    full_reply += chunk
+                    sentence_buffer += chunk
                     
+                    match = re.search(r'([.?!]\s+|\n)', sentence_buffer)
+                    if match or len(sentence_buffer) > 150:
+                        split_idx = match.end() if match else len(sentence_buffer)
+                        sentence = sentence_buffer[:split_idx].strip()
+                        sentence_buffer = sentence_buffer[split_idx:]
+                        
+                        if sentence:
+                            yield sentence
+                            
+                if not interrupt_event.is_set() and sentence_buffer.strip():
+                    yield sentence_buffer.strip()
+
+            # Pass the sentence generator to CartesiaSession
+            async for chunk_text, audio_b64 in cartesia.stream_turn(sentence_generator(), interrupt_event):
+                if interrupt_event.is_set():
+                    break
+                await websocket.send_text(json.dumps({
+                    "type": "reply_chunk",
+                    "text": chunk_text,
+                    "audio": audio_b64
+                }))
+                            
             if not interrupt_event.is_set():
                 turn_state["completed"] = True
                 await websocket.send_text(json.dumps({"type": "turn_end"}))
@@ -159,6 +153,8 @@ async def voice_websocket(websocket: WebSocket, token: str):
     finally:
         if current_turn_task and not current_turn_task.done():
             interrupt_event.set()
+            
+        await cartesia.close()
             
         async with async_session_maker() as db:
             result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
