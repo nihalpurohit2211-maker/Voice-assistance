@@ -77,9 +77,10 @@ async def _stream_with_intent_parsed(gen):
             yield chunk
 
 async def run_pipeline_streaming(user_id: uuid.UUID, message_text: str):
-    memories = await retrieve_memories(user_id, message_text, limit=5)
-    
-    memory_context = "\n".join([f"- {m}" for m in memories]) if memories else "No relevant memories."
+    # To prevent 5-7s latency spikes on Render/Neon free tiers (due to slow CPU fastembed 
+    # and cold-start DB queries), we bypass synchronous memory retrieval for voice.
+    # Memories are still extracted in the background via run_pipeline for text chat.
+    memory_context = "No relevant memories for this rapid voice turn."
     contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}"
     
     gen = stream_complete(contextualized_prompt, [{"role": "user", "content": message_text}])
