@@ -58,23 +58,29 @@ async def voice_websocket(websocket: WebSocket, token: str):
                     sentence_buffer = sentence_buffer[split_idx:]
                     
                     if sentence:
+                        is_first_chunk = True
                         async for audio_b64 in stream_speech(sentence):
                             if interrupt_event.is_set():
                                 break
+                            chunk_text = sentence if is_first_chunk else ""
+                            is_first_chunk = False
                             await websocket.send_text(json.dumps({
                                 "type": "reply_chunk",
-                                "text": sentence,
+                                "text": chunk_text,
                                 "audio": audio_b64
                             }))
                             
             if not interrupt_event.is_set() and sentence_buffer.strip():
                 sentence = sentence_buffer.strip()
+                is_first_chunk = True
                 async for audio_b64 in stream_speech(sentence):
                     if interrupt_event.is_set():
                         break
+                    chunk_text = sentence if is_first_chunk else ""
+                    is_first_chunk = False
                     await websocket.send_text(json.dumps({
                         "type": "reply_chunk",
-                        "text": sentence,
+                        "text": chunk_text,
                         "audio": audio_b64
                     }))
                     

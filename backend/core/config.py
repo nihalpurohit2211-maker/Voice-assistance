@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     JWT_EXPIRY_HOURS: int
     GROQ_API_KEY: Optional[str] = None
     CARTESIA_API_KEY: Optional[str] = None
+    FRONTEND_URL: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
