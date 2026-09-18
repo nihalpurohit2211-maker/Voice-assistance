@@ -98,14 +98,30 @@ async def voice_websocket(websocket: WebSocket, token: str):
                     full_reply += chunk
                     sentence_buffer += chunk
                     
-                    match = re.search(r'([.?!]\s+|\n)', sentence_buffer)
-                    if match or len(sentence_buffer) > 150:
-                        split_idx = match.end() if match else len(sentence_buffer)
+                    # Primary split: full sentence boundary [.?!] or newline
+                    match = re.search(r'([.?!]+(?:\s+|$))|\n+', sentence_buffer)
+                    # Do NOT split on commas or spaces under normal conditions, so prosody and speech remain natural!
+                    # Only fallback on clause boundary if sentence is exceptionally long (> 280 chars) without terminal punctuation
+                    if not match and len(sentence_buffer) > 280:
+                        match = re.search(r'([;:]\s+)', sentence_buffer)
+                    if not match and len(sentence_buffer) > 340:
+                        match = re.search(r'(,\s+)', sentence_buffer)
+                        
+                    if match:
+                        split_idx = match.end()
                         sentence = sentence_buffer[:split_idx].strip()
                         sentence_buffer = sentence_buffer[split_idx:]
-                        
                         if sentence:
                             yield sentence
+                    elif len(sentence_buffer) > 400:
+                        # Extreme fallback only if an LLM outputs 400+ chars with zero punctuation
+                        last_space = sentence_buffer.rfind(' ')
+                        if last_space > 150:
+                            split_idx = last_space + 1
+                            sentence = sentence_buffer[:split_idx].strip()
+                            sentence_buffer = sentence_buffer[split_idx:]
+                            if sentence:
+                                yield sentence
                             
                 if not interrupt_event.is_set() and sentence_buffer.strip():
                     yield sentence_buffer.strip()
@@ -206,7 +222,7 @@ async def voice_websocket(websocket: WebSocket, token: str):
                         sentence_buf = ""
                         for p in parts:
                             sentence_buf += p
-                            if re.search(r'[.?!]\s+|\n', p) or len(sentence_buf) > 100:
+                            if re.search(r'[.?!]\s+|\n', p) or len(sentence_buf) > 280:
                                 if sentence_buf.strip():
                                     yield sentence_buf.strip()
                                 sentence_buf = ""
