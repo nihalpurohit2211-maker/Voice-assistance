@@ -15,6 +15,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: Optional[uuid.UUID] = None
     mode: Optional[str] = None
+    guidance_mode: Optional[str] = None
 
 @router.post("/chat")
 async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_current_user)):
@@ -40,7 +41,8 @@ async def chat_endpoint(request: ChatRequest, current_user: User = Depends(get_c
             current_user.id, 
             request.message, 
             session_id=session_id, 
-            mode_override=request.mode
+            mode_override=request.mode,
+            guidance_mode=request.guidance_mode
         )
 
         async with async_session_maker() as db:

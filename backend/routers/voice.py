@@ -50,7 +50,7 @@ async def voice_websocket(websocket: WebSocket, token: str):
     except Exception as e:
         logger.warning(f"Cartesia init skipped or failed: {e}")
 
-    async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict, mode_override: str = None):
+    async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict, mode_override: str = None, guidance_mode: str = None):
         try:
             t0 = time.time()
             logger.info(f"VOICE_TURN_START: {t0}")
@@ -73,7 +73,8 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 text, 
                 session_id=session_id, 
                 history=session_history[-6:],
-                mode_override=mode_override, 
+                mode_override=mode_override,
+                guidance_mode=guidance_mode,
                 on_intent_parsed=handle_intent
             )
             
@@ -206,13 +207,14 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 text = msg.get("text", "")
                 use_cartesia = msg.get("use_cartesia", True)
                 mode = msg.get("mode")
+                guidance_mode = msg.get("guidance_mode")
                 
                 if current_turn_task and not current_turn_task.done():
                     interrupt_event.set()
                     
                 interrupt_event = asyncio.Event()
                 turn_state = {"completed": False, "spoken_offset": 0}
-                current_turn_task = asyncio.create_task(run_turn(text, use_cartesia, interrupt_event, turn_state, mode_override=mode))
+                current_turn_task = asyncio.create_task(run_turn(text, use_cartesia, interrupt_event, turn_state, mode_override=mode, guidance_mode=guidance_mode))
                 
             elif msg.get("type") == "interrupt":
                 if current_turn_task and not current_turn_task.done():
