@@ -29,6 +29,36 @@ async def complete(system_prompt: str, messages: list[dict], model: str = "opena
                 resp.raise_for_status()
                 data = resp.json()
                 return data["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Groq API error response: {e.response.text}")
+            try:
+                err_data = e.response.json().get("error", {})
+                if err_data.get("code") == "tool_use_failed" and "failed_generation" in err_data:
+                    fg = err_data["failed_generation"]
+                    try:
+                        fg_json = json.loads(fg)
+                        args = fg_json.get("arguments")
+                        if isinstance(args, dict):
+                            resp = args.get("response") or args.get("content") or args.get("reply")
+                            intent = args.get("intent", "small_talk")
+                            if resp:
+                                return f"[{intent}] {resp}"
+                            return str(args)
+                        elif args:
+                            return str(args)
+                    except Exception:
+                        pass
+                    import re
+                    m = re.search(r'"arguments"\s*:\s*(.*)', fg, re.DOTALL)
+                    if m:
+                        content = m.group(1).rstrip('}').strip().strip('"')
+                        return content
+            except Exception:
+                pass
+            if attempt == 1:
+                raise
+            else:
+                logger.warning(f"Groq API call failed, retrying: {e}")
         except httpx.HTTPError as e:
             if attempt == 1:
                 logger.error(f"Groq API call failed after 2 attempts: {e}")

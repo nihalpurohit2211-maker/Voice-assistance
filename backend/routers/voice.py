@@ -44,22 +44,30 @@ async def voice_websocket(websocket: WebSocket, token: str):
     cartesia = CartesiaSession()
     await cartesia.connect()
 
-    async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict):
+    async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict, mode_override: str = None):
         try:
             t0 = time.time()
             logger.info(f"VOICE_TURN_START: {t0}")
             
-            def handle_intent(intent: str):
-                if intent == "small_talk":
-                    cartesia.emotion = ["positivity:high"]
-                elif intent == "emotional":
-                    cartesia.emotion = ["positivity:highest"]
-                elif intent == "instruction":
-                    cartesia.emotion = ["curiosity:high"]
-                else:
-                    cartesia.emotion = None
+            parsed_intent_val = "small_talk"
+            active_mode_val = mode_override or "casual"
+            
+            if mode_override:
+                cartesia.set_mode(mode_override)
+
+            def handle_intent(intent: str, mode: str = None):
+                nonlocal parsed_intent_val, active_mode_val
+                parsed_intent_val = intent
+                active_mode_val = mode_override if mode_override else (mode or "casual")
+                cartesia.set_mode(active_mode_val)
                     
-            intent, text_gen = await run_pipeline_streaming(user_id, text, on_intent_parsed=handle_intent)
+            _, text_gen = await run_pipeline_streaming(
+                user_id, 
+                text, 
+                session_id=session_id, 
+                mode_override=mode_override, 
+                on_intent_parsed=handle_intent
+            )
             
             full_reply = ""
             first_token_received = False
@@ -83,7 +91,8 @@ async def voice_websocket(websocket: WebSocket, token: str):
                         asyncio.create_task(websocket.send_text(json.dumps({
                             "type": "metrics",
                             "ttfb": round(ttfb, 2),
-                            "intent": intent
+                            "intent": parsed_intent_val,
+                            "mode": active_mode_val
                         })))
                         
                     full_reply += chunk
@@ -166,13 +175,14 @@ async def voice_websocket(websocket: WebSocket, token: str):
             if msg.get("type") == "user_turn":
                 text = msg.get("text", "")
                 use_cartesia = msg.get("use_cartesia", True)
+                mode = msg.get("mode")
                 
                 if current_turn_task and not current_turn_task.done():
                     interrupt_event.set()
                     
                 interrupt_event = asyncio.Event()
                 turn_state = {"completed": False, "spoken_offset": 0}
-                current_turn_task = asyncio.create_task(run_turn(text, use_cartesia, interrupt_event, turn_state))
+                current_turn_task = asyncio.create_task(run_turn(text, use_cartesia, interrupt_event, turn_state, mode_override=mode))
                 
             elif msg.get("type") == "interrupt":
                 if current_turn_task and not current_turn_task.done():

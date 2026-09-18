@@ -8,6 +8,13 @@ from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+MODE_PROSODY = {
+    "casual": {"emotion": ["positivity:high"], "speed": "normal"},
+    "focused": {"emotion": None, "speed": "fast"},
+    "reflective": {"emotion": ["positivity:high"], "speed": "slow"},
+    "playful": {"emotion": ["positivity:highest", "curiosity:high"], "speed": "normal"},
+}
+
 class CartesiaSession:
     def __init__(self, voice_id: str = "a0e99841-438c-4a64-b679-ae501e7d6091"):
         if not settings.CARTESIA_API_KEY:
@@ -17,6 +24,26 @@ class CartesiaSession:
         self.ws = None
         self.connected = False
         self._lock = asyncio.Lock()
+        self.emotion = None
+        self.speed = "normal"
+        self.mode = "casual"
+
+    def set_mode(self, mode: str):
+        self.mode = mode
+        prosody = MODE_PROSODY.get(mode, MODE_PROSODY["casual"])
+        self.emotion = prosody.get("emotion")
+        self.speed = prosody.get("speed", "normal")
+
+    def _build_voice_payload(self):
+        voice_payload = {"mode": "id", "id": self.voice_id}
+        exp = {}
+        if getattr(self, 'emotion', None):
+            exp["emotion"] = self.emotion
+        if getattr(self, 'speed', None):
+            exp["speed"] = self.speed
+        if exp:
+            voice_payload["__experimental_controls"] = exp
+        return voice_payload
 
     async def connect(self):
         url = "wss://api.cartesia.ai/tts/websocket?cartesia_version=2024-06-10"
@@ -75,9 +102,7 @@ class CartesiaSession:
                         
                     await text_queue.put(chunk)
                     
-                    voice_payload = {"mode": "id", "id": self.voice_id}
-                    if hasattr(self, 'emotion') and self.emotion:
-                        voice_payload["__experimental_controls"] = {"emotion": self.emotion}
+                    voice_payload = self._build_voice_payload()
 
                     payload = {
                         "context_id": context_id,
@@ -99,9 +124,7 @@ class CartesiaSession:
                         
                 # End of turn
                 if self.connected and not interrupt_event.is_set() and not first:
-                    voice_payload = {"mode": "id", "id": self.voice_id}
-                    if hasattr(self, 'emotion') and self.emotion:
-                        voice_payload["__experimental_controls"] = {"emotion": self.emotion}
+                    voice_payload = self._build_voice_payload()
                     
                     await self.ws.send(json.dumps({
                         "context_id": context_id,
