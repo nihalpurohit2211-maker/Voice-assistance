@@ -39,10 +39,16 @@ async def voice_websocket(websocket: WebSocket, token: str):
     current_turn_task = None
     interrupt_event = None
     turn_state = {}
+    session_history = []
 
-    from backend.services.tts_client import CartesiaSession
-    cartesia = CartesiaSession()
-    await cartesia.connect()
+    cartesia = None
+    try:
+        if settings.CARTESIA_API_KEY:
+            from backend.services.tts_client import CartesiaSession
+            cartesia = CartesiaSession()
+            await cartesia.connect()
+    except Exception as e:
+        logger.warning(f"Cartesia init skipped or failed: {e}")
 
     async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict, mode_override: str = None):
         try:
@@ -52,19 +58,21 @@ async def voice_websocket(websocket: WebSocket, token: str):
             parsed_intent_val = "small_talk"
             active_mode_val = mode_override or "casual"
             
-            if mode_override:
+            if mode_override and cartesia:
                 cartesia.set_mode(mode_override)
 
             def handle_intent(intent: str, mode: str = None):
                 nonlocal parsed_intent_val, active_mode_val
                 parsed_intent_val = intent
                 active_mode_val = mode_override if mode_override else (mode or "casual")
-                cartesia.set_mode(active_mode_val)
+                if cartesia:
+                    cartesia.set_mode(active_mode_val)
                     
             _, text_gen = await run_pipeline_streaming(
                 user_id, 
                 text, 
                 session_id=session_id, 
+                history=session_history[-6:],
                 mode_override=mode_override, 
                 on_intent_parsed=handle_intent
             )
@@ -126,7 +134,7 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 if not interrupt_event.is_set() and sentence_buffer.strip():
                     yield sentence_buffer.strip()
 
-            if use_cartesia:
+            if use_cartesia and cartesia and getattr(cartesia, 'connected', False):
                 # Pass the sentence generator to CartesiaSession
                 async for chunk_text, audio_b64 in cartesia.stream_turn(sentence_generator(), interrupt_event):
                     if interrupt_event.is_set():
@@ -152,6 +160,9 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 turn_state["completed"] = True
                 await websocket.send_text(json.dumps({"type": "turn_end"}))
                 
+                session_history.append({"role": "user", "content": text})
+                session_history.append({"role": "assistant", "content": full_reply})
+                
                 async with async_session_maker() as db:
                     user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=parsed_intent_val)
                     asst_msg = ChatMessage(session_id=session_id, role="assistant", content=full_reply, was_interrupted=False)
@@ -163,6 +174,9 @@ async def voice_websocket(websocket: WebSocket, token: str):
             else:
                 spoken_offset = turn_state.get("spoken_offset", len(full_reply))
                 truncated_reply = full_reply[:spoken_offset]
+                
+                session_history.append({"role": "user", "content": text})
+                session_history.append({"role": "assistant", "content": truncated_reply})
                 
                 async with async_session_maker() as db:
                     user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=parsed_intent_val)
