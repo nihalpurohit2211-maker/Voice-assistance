@@ -22,6 +22,7 @@ class Memory(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     text_content = Column("text", TEXT, nullable=False)
     embedding = Column(Vector(384), nullable=False)
+    superseded = Column(BOOLEAN, nullable=False, server_default=text("false"))
     created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (

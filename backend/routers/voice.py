@@ -44,12 +44,22 @@ async def voice_websocket(websocket: WebSocket, token: str):
     cartesia = CartesiaSession()
     await cartesia.connect()
 
-    async def run_turn(text: str, interrupt_event: asyncio.Event, turn_state: dict):
+    async def run_turn(text: str, use_cartesia: bool, interrupt_event: asyncio.Event, turn_state: dict):
         try:
             t0 = time.time()
             logger.info(f"VOICE_TURN_START: {t0}")
             
-            intent, text_gen = await run_pipeline_streaming(user_id, text)
+            def handle_intent(intent: str):
+                if intent == "small_talk":
+                    cartesia.emotion = ["positivity:high"]
+                elif intent == "emotional":
+                    cartesia.emotion = ["positivity:highest"]
+                elif intent == "instruction":
+                    cartesia.emotion = ["curiosity:high"]
+                else:
+                    cartesia.emotion = None
+                    
+            intent, text_gen = await run_pipeline_streaming(user_id, text, on_intent_parsed=handle_intent)
             
             full_reply = ""
             first_token_received = False
@@ -65,8 +75,16 @@ async def voice_websocket(websocket: WebSocket, token: str):
                         
                     if not first_token_received and chunk.strip():
                         t1 = time.time()
-                        logger.info(f"FIRST_TOKEN_RECEIVED: {t1} (Delay: {t1 - t0:.3f}s)")
+                        ttfb = t1 - t0
+                        logger.info(f"FIRST_TOKEN_RECEIVED: {t1} (Delay: {ttfb:.3f}s)")
                         first_token_received = True
+                        
+                        # Send metrics to frontend
+                        asyncio.create_task(websocket.send_text(json.dumps({
+                            "type": "metrics",
+                            "ttfb": round(ttfb, 2),
+                            "intent": intent
+                        })))
                         
                     full_reply += chunk
                     sentence_buffer += chunk
@@ -83,15 +101,27 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 if not interrupt_event.is_set() and sentence_buffer.strip():
                     yield sentence_buffer.strip()
 
-            # Pass the sentence generator to CartesiaSession
-            async for chunk_text, audio_b64 in cartesia.stream_turn(sentence_generator(), interrupt_event):
-                if interrupt_event.is_set():
-                    break
-                await websocket.send_text(json.dumps({
-                    "type": "reply_chunk",
-                    "text": chunk_text,
-                    "audio": audio_b64
-                }))
+            if use_cartesia:
+                # Pass the sentence generator to CartesiaSession
+                async for chunk_text, audio_b64 in cartesia.stream_turn(sentence_generator(), interrupt_event):
+                    if interrupt_event.is_set():
+                        break
+                    await websocket.send_text(json.dumps({
+                        "type": "reply_chunk",
+                        "text": chunk_text,
+                        "audio": audio_b64
+                    }))
+            else:
+                # Bypass Cartesia completely
+                async for chunk_text in sentence_generator():
+                    if interrupt_event.is_set():
+                        break
+                    if chunk_text.strip():
+                        await websocket.send_text(json.dumps({
+                            "type": "reply_chunk",
+                            "text": chunk_text,
+                            "audio": ""
+                        }))
                             
             if not interrupt_event.is_set():
                 turn_state["completed"] = True
@@ -135,19 +165,68 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 
             if msg.get("type") == "user_turn":
                 text = msg.get("text", "")
+                use_cartesia = msg.get("use_cartesia", True)
                 
                 if current_turn_task and not current_turn_task.done():
                     interrupt_event.set()
                     
                 interrupt_event = asyncio.Event()
                 turn_state = {"completed": False, "spoken_offset": 0}
-                current_turn_task = asyncio.create_task(run_turn(text, interrupt_event, turn_state))
+                current_turn_task = asyncio.create_task(run_turn(text, use_cartesia, interrupt_event, turn_state))
                 
             elif msg.get("type") == "interrupt":
                 if current_turn_task and not current_turn_task.done():
                     if not turn_state.get("completed"):
                         turn_state["spoken_offset"] = msg.get("spoken_offset", 0)
                         interrupt_event.set()
+                        
+            elif msg.get("type") == "replay_turn":
+                text_to_replay = msg.get("text", "")
+                use_cartesia = msg.get("use_cartesia", True)
+                
+                if current_turn_task and not current_turn_task.done():
+                    interrupt_event.set()
+                    
+                interrupt_event = asyncio.Event()
+                turn_state = {"completed": False, "spoken_offset": 0}
+                
+                async def run_replay_task():
+                    async def replay_generator():
+                        parts = re.split(r'([.?!]\s+|\n)', text_to_replay)
+                        sentence_buf = ""
+                        for p in parts:
+                            sentence_buf += p
+                            if re.search(r'[.?!]\s+|\n', p) or len(sentence_buf) > 100:
+                                if sentence_buf.strip():
+                                    yield sentence_buf.strip()
+                                sentence_buf = ""
+                        if sentence_buf.strip():
+                            yield sentence_buf.strip()
+                            
+                    if use_cartesia:
+                        async for chunk_text, audio_b64 in cartesia.stream_turn(replay_generator(), interrupt_event):
+                            if interrupt_event.is_set():
+                                break
+                            await websocket.send_text(json.dumps({
+                                "type": "reply_chunk",
+                                "text": chunk_text,
+                                "audio": audio_b64
+                            }))
+                    else:
+                        async for s in replay_generator():
+                            if interrupt_event.is_set():
+                                break
+                            await websocket.send_text(json.dumps({
+                                "type": "reply_chunk",
+                                "text": s,
+                                "audio": ""
+                            }))
+                            
+                    if not interrupt_event.is_set():
+                        turn_state["completed"] = True
+                        await websocket.send_text(json.dumps({"type": "turn_end"}))
+                        
+                current_turn_task = asyncio.create_task(run_replay_task())
                         
     except WebSocketDisconnect:
         pass

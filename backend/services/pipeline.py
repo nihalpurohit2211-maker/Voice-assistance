@@ -11,11 +11,10 @@ question
 instruction
 emotional"""
 
-SYSTEM_PROMPT = """You are a calm, comforting, and highly capable voice assistant. 
-Be concise but warm. Use the user's context and memories below to inform your response, but do not mention the memories directly unless relevant.
+SYSTEM_PROMPT = """You are a calm, comforting, and reassuring voice assistant. Your presence is steady, kind, and patient. Speak with gentle warmth and understanding—never clinical, rushed, or overly cheerful. Listen deeply, acknowledge the user with care, and offer thoughtful, grounded answers. Keep responses naturally concise for spoken conversation. Use the user's context and memories below to inform your response, but do not mention the memories directly unless relevant.
 
 CRITICAL: Your response MUST start exactly with an intent tag in brackets, chosen from: [small_talk], [question], [instruction], or [emotional]. Immediately after the tag, provide your response.
-Example: [small_talk] It's so nice to hear from you!"""
+Example: [small_talk] Take your time. I'm right here with you."""
 
 MEMORY_PROMPT = """Analyze the following exchange. Does it contain a persistent, factual piece of information about the user that is worth remembering long-term?
 If yes, output a concise single sentence summarizing the fact.
@@ -54,7 +53,11 @@ async def extract_memory_from_exchange(user_id: uuid.UUID, message_text: str, re
 from backend.services.llm_client import stream_complete
 import re
 
-async def _stream_with_intent_parsed(gen):
+import asyncio
+
+USER_MEMORY_CACHE = {}
+
+async def _stream_with_intent_parsed(gen, on_intent_parsed=None):
     buffer = ""
     intent_parsed = False
     
@@ -66,25 +69,39 @@ async def _stream_with_intent_parsed(gen):
                 intent = buffer[1:end_idx].lower()
                 remaining = buffer[end_idx+1:].lstrip()
                 intent_parsed = True
+                if on_intent_parsed:
+                    on_intent_parsed(intent)
                 if remaining:
                     yield remaining
             elif len(buffer) > 30 and "[" not in buffer:
                 # Fallback if LLM forgot the tag
                 intent = "small_talk"
                 intent_parsed = True
+                if on_intent_parsed:
+                    on_intent_parsed(intent)
                 yield buffer
         else:
             yield chunk
 
-async def run_pipeline_streaming(user_id: uuid.UUID, message_text: str):
-    # To prevent 5-7s latency spikes on Render/Neon free tiers (due to slow CPU fastembed 
-    # and cold-start DB queries), we bypass synchronous memory retrieval for voice.
-    # Memories are still extracted in the background via run_pipeline for text chat.
-    memory_context = "No relevant memories for this rapid voice turn."
+async def prefetch_memories(user_id: uuid.UUID, message_text: str):
+    """Background task to fetch and cache memories based on the current conversational topic."""
+    try:
+        memories = await retrieve_memories(user_id, message_text, limit=5)
+        if memories:
+            USER_MEMORY_CACHE[user_id] = "\n".join([f"- {m}" for m in memories])
+    except Exception as e:
+        logger.error(f"Error prefetching memories: {e}")
+
+async def run_pipeline_streaming(user_id: uuid.UUID, message_text: str, on_intent_parsed=None):
+    # Fetch from ultra-fast in-memory cache populated by previous turns
+    memory_context = USER_MEMORY_CACHE.get(user_id, "No relevant memories yet.")
+    
+    # Fire off a background task to fetch memories for the NEXT turn based on THIS turn's topic
+    # This completely removes the 6-second DB/Embed delay from the critical path!
+    asyncio.create_task(prefetch_memories(user_id, message_text))
+    
     contextualized_prompt = f"{SYSTEM_PROMPT}\n\nContext Memories:\n{memory_context}"
     
     gen = stream_complete(contextualized_prompt, [{"role": "user", "content": message_text}])
     
-    # We can't return intent synchronously anymore because it streams.
-    # The caller expects (intent, text_gen). We'll default intent here to "streaming" and caller can just ignore it for voice.
-    return "streaming", _stream_with_intent_parsed(gen)
+    return "streaming", _stream_with_intent_parsed(gen, on_intent_parsed)

@@ -51,6 +51,12 @@ class CartesiaSession:
         """
         await self._ensure_connected()
         if not self.connected:
+            logger.warning("Cartesia unavailable. Falling back to text-only streaming.")
+            async for chunk in text_chunk_gen:
+                if interrupt_event.is_set():
+                    break
+                if chunk.strip():
+                    yield chunk, ""  # empty base64 string for audio
             return
 
         context_id = str(uuid.uuid4())
@@ -69,12 +75,16 @@ class CartesiaSession:
                         
                     await text_queue.put(chunk)
                     
+                    voice_payload = {"mode": "id", "id": self.voice_id}
+                    if hasattr(self, 'emotion') and self.emotion:
+                        voice_payload["__experimental_controls"] = {"emotion": self.emotion}
+
                     payload = {
                         "context_id": context_id,
                         "transcript": chunk + " ",
                         "continue": True,
                         "model_id": "sonic-latest",
-                        "voice": {"mode": "id", "id": self.voice_id},
+                        "voice": voice_payload,
                         "output_format": {
                             "container": "raw",
                             "encoding": "pcm_s16le",
@@ -89,12 +99,16 @@ class CartesiaSession:
                         
                 # End of turn
                 if self.connected and not interrupt_event.is_set() and not first:
+                    voice_payload = {"mode": "id", "id": self.voice_id}
+                    if hasattr(self, 'emotion') and self.emotion:
+                        voice_payload["__experimental_controls"] = {"emotion": self.emotion}
+                    
                     await self.ws.send(json.dumps({
                         "context_id": context_id,
                         "transcript": "",
                         "continue": False,
                         "model_id": "sonic-latest",
-                        "voice": {"mode": "id", "id": self.voice_id},
+                        "voice": voice_payload,
                         "output_format": {
                             "container": "raw",
                             "encoding": "pcm_s16le",
