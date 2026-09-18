@@ -153,7 +153,7 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 await websocket.send_text(json.dumps({"type": "turn_end"}))
                 
                 async with async_session_maker() as db:
-                    user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=intent)
+                    user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=parsed_intent_val)
                     asst_msg = ChatMessage(session_id=session_id, role="assistant", content=full_reply, was_interrupted=False)
                     db.add(user_msg)
                     db.add(asst_msg)
@@ -165,7 +165,7 @@ async def voice_websocket(websocket: WebSocket, token: str):
                 truncated_reply = full_reply[:spoken_offset]
                 
                 async with async_session_maker() as db:
-                    user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=intent)
+                    user_msg = ChatMessage(session_id=session_id, role="user", content=text, intent=parsed_intent_val)
                     asst_msg = ChatMessage(session_id=session_id, role="assistant", content=truncated_reply, was_interrupted=True)
                     db.add(user_msg)
                     db.add(asst_msg)
